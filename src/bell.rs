@@ -392,6 +392,9 @@ fn handle_ble_event(event: Option<BluetoothEvent>) -> Option<JoystickEvent> {
 }
 
 fn main() {
+    println!("Enable Bluetooth power before running this method,");
+    println!("bluetoothctl power on");
+
     let bt_session = &BluetoothSession::create_session(None).unwrap();
 
     let joysticks = get_joysticks_with_event(bt_session, 10).unwrap();
