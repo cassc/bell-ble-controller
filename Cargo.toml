@@ -1,0 +1,41 @@
+[package]
+name = "bell-ble-controller"
+version = "0.1.0"
+authors = ["Chen Li <chencassc@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rand = "*"
+btleplug = { version = "0.5.1", features = ["serde"] }
+bluez = "0.1.3"
+async-std = "1.6.2"
+blurz = "0.4.0"
+lazy_static = "1.4.0"
+regex = "*"
+rumble = "0.3"
+uuid = "0.8"
+
+
+[[bin]]
+name="blue"
+path = "src/blue.rs"
+
+[[bin]]
+name="bell"
+path = "src/bell.rs"
+
+[[bin]]
+name="m"
+path = "src/main.rs"
+
+[[bin]]
+name="rum"
+path = "src/rum.rs"
+
+[[bin]]
+name="mmc"
+path = "src/mmc.rs"
+
+
