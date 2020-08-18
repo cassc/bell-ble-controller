@@ -3,20 +3,22 @@
 
 static BELL_CONTROLLER_SERVICE_UUID: &'static str = "00008850-0000-1000-8000-00805f9b34fb";
 static BELL_CONTROLLER_CHARACTER_UUID: &'static str = "0000885a-0000-1000-8000-00805f9b34fb";
-
 use blurz::bluetooth_adapter::BluetoothAdapter;
 use blurz::bluetooth_device::BluetoothDevice;
 use blurz::bluetooth_discovery_session::BluetoothDiscoverySession;
 use blurz::bluetooth_event::BluetoothEvent;
+use blurz::bluetooth_event::BluetoothEvent::RSSI;
 use blurz::bluetooth_gatt_characteristic::BluetoothGATTCharacteristic;
 use blurz::bluetooth_gatt_descriptor::BluetoothGATTDescriptor;
 use blurz::bluetooth_gatt_service::BluetoothGATTService;
 use blurz::bluetooth_session::BluetoothSession;
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::error::Error;
 use std::str;
 use std::thread;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const UUID_REGEX: &str = r"([0-9a-f]{4})([0-9a-f]{4})-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
 
@@ -152,70 +154,94 @@ pub fn explore_device(device: &BluetoothDevice, session: &BluetoothSession) {
     }
 }
 
-fn read_notification(characteristic: &BluetoothGATTCharacteristic, session: &BluetoothSession) {
-    // let temp_humidity = BluetoothGATTCharacteristic::new(
-    //     session,
-    //     String::from("/org/bluez/hci0/dev_A4_C1_38_15_03_55/service0021/char0035"),
-    // );
-    characteristic.start_notify().unwrap();
-    loop {
-        for event in BluetoothSession::create_session(None)
-            .unwrap()
-            .incoming(1000)
-            .map(BluetoothEvent::from)
-        {
-            println!("event {:?}", event);
-        }
-    }
-}
+fn get_joysticks_paired(
+    bt_session: &BluetoothSession,
+) -> Result<Vec<BluetoothDevice>, Box<dyn Error>> {
+    let adapter: BluetoothAdapter = BluetoothAdapter::init(bt_session)?;
 
-fn main() {
-    let bt_session = &BluetoothSession::create_session(None).unwrap();
-    let adapter: BluetoothAdapter = BluetoothAdapter::init(bt_session).unwrap();
-    let adapter_id = adapter.get_id();
-    let discover_session =
-        BluetoothDiscoverySession::create_session(&bt_session, adapter_id).unwrap();
-
-    // let device_list = adapter.get_device_list().unwrap();
-    // for device_path in device_list {
-    //     let r = adapter.remove_device(device_path.clone());
-    //     println!("Remove {} {:?} ", device_path, r);
-    // }
-
-    discover_session.start_discovery().unwrap();
-    thread::sleep(Duration::from_secs(5));
-    let device_list = adapter.get_device_list().unwrap();
-    discover_session.stop_discovery().unwrap();
+    let mut devices = vec![];
+    let device_list = adapter.get_device_list()?;
 
     for device_path in device_list {
         let device = BluetoothDevice::new(bt_session, device_path.to_string());
-        // Device: "/org/bluez/hci0/dev_10_38_C1_30_7B_03" Name: Some("bell_Controller")
-        // Device: "/org/bluez/hci0/dev_10_38_C1_00_00_0C" Name: Some("bell_Controller")
         println!(
             "Device: {:?} Name: {:?}, rssi: {:?}",
             device_path,
             device.get_name().ok(),
             device.get_rssi().ok()
         );
+        if let Ok(name) = device.get_name() {
+            if name.contains("bell") {
+                devices.push(device);
+            }
+        }
     }
 
-    for uuid in adapter.get_uuids().unwrap() {
-        println!("uuid: {}", uuid);
+    Ok(devices)
+}
+
+fn get_joysticks_with_event(
+    bt_session: &BluetoothSession,
+    timeout_secs: u64,
+) -> Result<Vec<BluetoothDevice>, Box<dyn Error>> {
+    let adapter: BluetoothAdapter = BluetoothAdapter::init(bt_session)?;
+    let adapter_id = adapter.get_id();
+    let discover_session = BluetoothDiscoverySession::create_session(&bt_session, adapter_id)?;
+
+    let start = SystemTime::now();
+    let mut devices = vec![];
+    discover_session.start_discovery()?;
+
+    for event in bt_session.incoming(1000).map(BluetoothEvent::from) {
+        let now = SystemTime::now();
+        if now > start + Duration::from_secs(timeout_secs) {
+            println!("discovery timeout");
+            break;
+        }
+        match event {
+            Some(RSSI { object_path, rssi }) => {
+                let device = BluetoothDevice::new(bt_session, object_path.clone());
+
+                if let Ok(name) = device.get_name() {
+                    println!("{} {} {}", &object_path, rssi, name);
+                    if name.contains("bell") {
+                        devices.push(device.clone())
+                    }
+                } else {
+                    println!("{} {}", &object_path, rssi);
+                }
+            }
+            _ => println!("{:?}", event),
+        }
     }
 
-    // let mut device: Option<BluetoothDevice> = None;
-    // loop {
-    // }
+    discover_session.stop_discovery()?;
+    Ok(devices)
+}
 
-    let device = BluetoothDevice::new(
-        bt_session,
-        String::from("/org/bluez/hci0/dev_10_38_C1_00_00_0C"), // bell company
-                                                               // String::from("/org/bluez/hci0/dev_10_38_C1_30_7B_03"), // bell
-                                                               // String::from("/org/bluez/hci0/dev_00_62_79_D9_16_A1"), // emt
-                                                               // String::from("/org/bluez/hci0/dev_00_81_F9_DF_B0_40"), // mmc
-    );
+fn enable_joystick_notify(
+    bt_session: &BluetoothSession,
+    device: &BluetoothDevice,
+) -> Result<(), Box<dyn Error>> {
+    let uuid_service = "8850";
+    let uuid_characteritic = "885a";
 
-    if !device.is_paired().unwrap() {
+    if let Some(service) = get_service(uuid_service, &device, bt_session) {
+        let session = bt_session;
+
+        if let Some(ch) = get_characteritic(uuid_characteritic, &service, session) {
+            ch.start_notify()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn connect_joystick(
+    bt_session: &BluetoothSession,
+    device: &BluetoothDevice,
+) -> Result<(), Box<dyn Error>> {
+    if !device.is_paired()? {
         let r = device.pair();
         println!("Pair returns {:?}", r);
     } else {
@@ -223,45 +249,43 @@ fn main() {
     }
 
     if let Err(e) = device.connect(10000) {
-        println!("Failed to connect {:?}: {:?}", device.get_id(), e);
+        println!("Failed to connect {}: {:?}", device.get_id(), e);
     } else {
-        println!("Connected!");
-        // We need to wait a bit after calling connect to safely
-        // get the gatt services
-        thread::sleep(Duration::from_secs(5));
-
-        // print services, characteristics and descriptors
-        explore_device(&device, bt_session);
-
+        let r = enable_joystick_notify(&bt_session, &device);
         println!(
-            "--------------------------------------------------------------------------------"
+            "Connect success! {}. Enable notify: {:?}",
+            device.get_id(),
+            r
         );
+    }
 
-        let uuid_service = "8850";
-        let uuid_characteritic = "885a";
+    Ok(())
+}
 
-        // let uuid_service = "1809";
-        // let uuid_characteritic = "2a1e";
+fn main() {
+    let bt_session = &BluetoothSession::create_session(None).unwrap();
 
-        if let Some(service) = get_service(uuid_service, &device, bt_session) {
-            let session = bt_session;
+    let joysticks = get_joysticks_with_event(bt_session, 10).unwrap();
+    let joysticks_paired = get_joysticks_paired(bt_session).unwrap();
 
-            if let Some(ch) = get_characteritic(uuid_characteritic, &service, session) {
-                ch.start_notify().unwrap();
+    if joysticks.len() == 0 && joysticks_paired.len() == 0 {
+        eprintln!("No joysticks found, exit");
+        return;
+    }
 
-                loop {
-                    for event in session.incoming(1000).map(BluetoothEvent::from) {
-                        println!("recv: {:?}", event);
-                    }
-                }
-            }
-        } else {
-            eprintln!("Service not found!");
+    for device in joysticks.iter() {
+        let r = connect_joystick(bt_session, &device);
+        println!("{:?} result {:?}", device, r);
+    }
+
+    for device in joysticks_paired.iter() {
+        let r = connect_joystick(bt_session, &device);
+        println!("{:?} result {:?}", device, r);
+    }
+
+    loop {
+        for event in bt_session.incoming(1000).map(BluetoothEvent::from) {
+            println!("recv: {:?}", event);
         }
-
-        // Interact with device
-        device.disconnect().unwrap();
-
-        println!("Device disconnected!");
     }
 }
