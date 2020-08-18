@@ -7,7 +7,7 @@ use blurz::bluetooth_adapter::BluetoothAdapter;
 use blurz::bluetooth_device::BluetoothDevice;
 use blurz::bluetooth_discovery_session::BluetoothDiscoverySession;
 use blurz::bluetooth_event::BluetoothEvent;
-use blurz::bluetooth_event::BluetoothEvent::RSSI;
+use blurz::bluetooth_event::BluetoothEvent::{Connected, ServicesResolved, Value, RSSI};
 use blurz::bluetooth_gatt_characteristic::BluetoothGATTCharacteristic;
 use blurz::bluetooth_gatt_descriptor::BluetoothGATTDescriptor;
 use blurz::bluetooth_gatt_service::BluetoothGATTService;
@@ -19,6 +19,63 @@ use std::str;
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Debug)]
+pub struct JoystickKeyEvent {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+    i: bool,
+    ii: bool,
+    a: bool,
+    b: bool,
+    c: bool,
+    d: bool,
+    l1: bool,
+    l2: (u8, bool),
+    r1: bool,
+    r2: (u8, bool),
+    rl: (u8, u8),
+    rr: (u8, u8),
+}
+
+#[derive(Clone, Debug)]
+pub enum JoystickEvent {
+    Key(String, JoystickKeyEvent),
+    Home(String, bool),
+}
+
+// 手柄10字节对应的按键
+// 方向键不可组合
+const JS_UP: (usize, u8) = (8, 1);
+const JS_DOWN: (usize, u8) = (8, 5);
+const JS_LEFT: (usize, u8) = (8, 7);
+const JS_RIGHT: (usize, u8) = (8, 3);
+// const JS_UP_LEFT: (usize, u8) = (8, 8);
+// const JS_UP_RIGHT: (usize, u8) = (8, 2);
+// const JS_DOWN_LEFT: (usize, u8) = (8, 6);
+// const JS_DOWN_RIGHT: (usize, u8) = (8, 4);
+
+// 其他键可组合
+const JS_I: (usize, u8) = (7, 4);
+const JS_II: (usize, u8) = (7, 8);
+const JS_A: (usize, u8) = (6, 1);
+const JS_B: (usize, u8) = (6, 2);
+const JS_C: (usize, u8) = (6, 8);
+const JS_D: (usize, u8) = (6, 16);
+const JS_L1: (usize, u8) = (6, 0x40);
+const JS_R1: (usize, u8) = (6, 0x80);
+
+// 模拟量按键，后一个数字表示是否完全按下
+const JS_L2: (usize, usize, u8) = (4, 7, 1);
+const JS_R2: (usize, usize, u8) = (5, 7, 2);
+
+// 左右侧旋钮
+const JS_RL: (usize, usize) = (0, 1);
+const JS_RR: (usize, usize) = (2, 3);
+
+const BELL_HOME_DOWN: [u8; 3] = [8, 0, 0];
 
 const UUID_REGEX: &str = r"([0-9a-f]{4})([0-9a-f]{4})-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
 
@@ -262,6 +319,78 @@ fn connect_joystick(
     Ok(())
 }
 
+fn handle_ble_event(event: Option<BluetoothEvent>) -> Option<JoystickEvent> {
+    if let Some(event) = event {
+        match event {
+            Value { object_path, value } => {
+                println!("{:x?}", value);
+                let len = value.len();
+                if len == 10 {
+                    let up = value[JS_UP.0] == JS_UP.1;
+                    let down = value[JS_DOWN.0] == JS_DOWN.1;
+                    let left = value[JS_LEFT.0] == JS_LEFT.1;
+                    let right = value[JS_RIGHT.0] == JS_RIGHT.1;
+                    let i = value[JS_I.0] & JS_I.1 > 0;
+                    let ii = value[JS_II.0] & JS_II.1 > 0;
+                    let a = value[JS_A.0] & JS_A.1 > 0;
+                    let b = value[JS_B.0] & JS_B.1 > 0;
+                    let c = value[JS_C.0] & JS_C.1 > 0;
+                    let d = value[JS_D.0] & JS_D.1 > 0;
+                    let l1 = value[JS_L1.0] & JS_L1.1 > 0;
+                    let r1 = value[JS_R1.0] & JS_R1.1 > 0;
+                    let l2 = (value[JS_L2.0], value[JS_L2.1] & JS_L2.2 > 0);
+                    let r2 = (value[JS_R2.0], value[JS_R2.1] & JS_R2.2 > 0);
+                    let rl = (value[JS_RL.0], value[JS_RL.1]);
+                    let rr = (value[JS_RR.0], value[JS_RR.1]);
+
+                    return Some(JoystickEvent::Key(
+                        object_path,
+                        JoystickKeyEvent {
+                            up,
+                            down,
+                            left,
+                            right,
+                            i,
+                            ii,
+                            a,
+                            b,
+                            c,
+                            d,
+                            l1,
+                            l2,
+                            r1,
+                            r2,
+                            rl,
+                            rr,
+                        },
+                    ));
+                } else if len == 3 {
+                    let down = *value == BELL_HOME_DOWN;
+                    return Some(JoystickEvent::Home(object_path, down));
+                }
+            }
+            Connected {
+                object_path,
+                connected,
+            } => {
+                println!(
+                    "Device {}connected {}",
+                    object_path,
+                    if connected { "" } else { "dis" }
+                );
+            }
+
+            ServicesResolved {
+                object_path,
+                services_resolved,
+            } => {}
+
+            _ => {}
+        }
+    }
+    None
+}
+
 fn main() {
     let bt_session = &BluetoothSession::create_session(None).unwrap();
 
@@ -286,6 +415,9 @@ fn main() {
     loop {
         for event in bt_session.incoming(1000).map(BluetoothEvent::from) {
             println!("recv: {:?}", event);
+            if let Some(event) = handle_ble_event(event) {
+                println!("recv key event: {:?}", event);
+            }
         }
     }
 }
