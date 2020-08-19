@@ -1,22 +1,22 @@
-/// Run this command to turn on bluetooth first:
-/// bluetoothctl power on
-
-static BATTERY_SERVICE_UUID: &'static str = "0000180f-0000-1000-8000-00805f9b34fb";
-static BELL_CONTROLLER_SERVICE_UUID: &'static str = "0000885a-0000-1000-8000-00805f9b34fb";
-
 use blurz::bluetooth_adapter::BluetoothAdapter;
 use blurz::bluetooth_device::BluetoothDevice;
 use blurz::bluetooth_discovery_session::BluetoothDiscoverySession;
 use blurz::bluetooth_event::BluetoothEvent;
+use blurz::bluetooth_event::BluetoothEvent::{Connected, ServicesResolved, Value, RSSI};
 use blurz::bluetooth_gatt_characteristic::BluetoothGATTCharacteristic;
 use blurz::bluetooth_gatt_descriptor::BluetoothGATTDescriptor;
 use blurz::bluetooth_gatt_service::BluetoothGATTService;
 use blurz::bluetooth_session::BluetoothSession;
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::error::Error;
 use std::str;
 use std::thread;
 use std::time::Duration;
+
+const MMC_SERVICE_UUID: &str = "1809";
+const MMC_CHAR_UUID: &str = "2a1e";
+const MMC_TITLE: &str = "MMC";
 
 const UUID_REGEX: &str = r"([0-9a-f]{4})([0-9a-f]{4})-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}";
 
@@ -24,7 +24,6 @@ lazy_static! {
     static ref RE: Regex = Regex::new(UUID_REGEX).unwrap();
 }
 
-/// List characteristics in service
 pub fn list_characteritics(service: &BluetoothGATTService, session: &BluetoothSession) {
     // list characteristics
     let characteristics = service.get_gatt_characteristics().unwrap();
@@ -45,6 +44,53 @@ pub fn list_characteritics(service: &BluetoothGATTService, session: &BluetoothSe
         );
 
         list_descriptors(&characteristic, session);
+    }
+}
+
+/// List descriptors in characteristic
+pub fn list_descriptors(characteristic: &BluetoothGATTCharacteristic, session: &BluetoothSession) {
+    let descriptors = characteristic.get_gatt_descriptors().unwrap();
+    for descriptor_path in descriptors {
+        let descriptor = BluetoothGATTDescriptor::new(session, descriptor_path);
+        let uuid = descriptor.get_uuid().unwrap();
+        let assigned_number = RE
+            .captures(&uuid)
+            .unwrap()
+            .get(2)
+            .map_or("", |m| m.as_str());
+        let value = descriptor.read_value(None).unwrap();
+        let value = match &assigned_number[4..] {
+            "2901" => str::from_utf8(&value).unwrap().to_string(),
+            _ => format!("{:x?}", value),
+        };
+
+        println!(
+            "    Descriptor UUID: {}, Assigned Number: 0x{:?} Read Value: {:?}",
+            uuid, assigned_number, value
+        );
+    }
+}
+
+pub fn explore_device(device: &BluetoothDevice, session: &BluetoothSession) {
+    // list services
+    let services_list = device.get_gatt_services().unwrap();
+
+    for service_path in services_list {
+        let service = BluetoothGATTService::new(session, service_path.to_string());
+        let uuid = service.get_uuid().unwrap();
+        let assigned_number = RE
+            .captures(&uuid)
+            .unwrap()
+            .get(2)
+            .map_or("", |m| m.as_str());
+
+        println!(
+            "Service UUID: {:?} Assigned Number: 0x{:?}",
+            uuid, assigned_number
+        );
+
+        list_characteritics(&service, session);
+        println!("");
     }
 }
 
@@ -105,87 +151,71 @@ pub fn get_characteritic<'a, 'b>(
     return None;
 }
 
-/// List descriptors in characteristic
-pub fn list_descriptors(characteristic: &BluetoothGATTCharacteristic, session: &BluetoothSession) {
-    let descriptors = characteristic.get_gatt_descriptors().unwrap();
-    for descriptor_path in descriptors {
-        let descriptor = BluetoothGATTDescriptor::new(session, descriptor_path);
-        let uuid = descriptor.get_uuid().unwrap();
-        let assigned_number = RE
-            .captures(&uuid)
-            .unwrap()
-            .get(2)
-            .map_or("", |m| m.as_str());
-        let value = descriptor.read_value(None).unwrap();
-        let value = match &assigned_number[4..] {
-            "2901" => str::from_utf8(&value).unwrap().to_string(),
-            _ => format!("{:?}", value),
-        };
+fn parse_mmc_data(data: Box<[u8]>) -> Option<(f32, f32, f32, f32)> {
+    if data.len() == 6 {
+        let mut t0: f32 = data[2] as f32 * 256.0 + data[1] as f32;
+        let mut offset: f32 = 0.0;
+        let mut t1: f32 = 0.0;
+        let mut t4: f32 = t0;
 
-        println!(
-            "    Descriptor UUID: {}, Assigned Number: 0x{:?} Read Value: {:?}",
-            uuid, assigned_number, value
-        );
-    }
-}
+        if data[3] != 0xf2 || data[4] != 0x7f {
+            t1 = data[4] as f32 * 256.0 + data[3] as f32;
+            let diff = t0 - t1;
+            offset = diff / 2.0;
 
-pub fn explore_device(device: &BluetoothDevice, session: &BluetoothSession) {
-    // list services
-    let services_list = device.get_gatt_services().unwrap();
+            if diff > 0.0 {
+                let mut off = diff;
+                while off > 200.0 {
+                    off = off - 100.0;
+                }
 
-    for service_path in services_list {
-        let service = BluetoothGATTService::new(session, service_path.to_string());
-        let uuid = service.get_uuid().unwrap();
-        let assigned_number = RE
-            .captures(&uuid)
-            .unwrap()
-            .get(2)
-            .map_or("", |m| m.as_str());
+                if off < 100.0 {
+                    off += 50.0;
+                }
 
-        println!(
-            "Service UUID: {:?} Assigned Number: 0x{:?}",
-            uuid, assigned_number
-        );
+                t4 = t0 + off;
+            }
 
-        list_characteritics(&service, session);
-        println!("");
-    }
-}
-
-fn read_notification(characteristic: &BluetoothGATTCharacteristic, session: &BluetoothSession) {
-    // let temp_humidity = BluetoothGATTCharacteristic::new(
-    //     session,
-    //     String::from("/org/bluez/hci0/dev_A4_C1_38_15_03_55/service0021/char0035"),
-    // );
-    characteristic.start_notify().unwrap();
-    loop {
-        for event in BluetoothSession::create_session(None)
-            .unwrap()
-            .incoming(1000)
-            .map(BluetoothEvent::from)
-        {
-            println!("event {:?}", event);
+            if offset > 1.0 {
+                offset = 1.0;
+            }
         }
+
+        let mut toff = t0 + offset;
+        t1 = t1 / 100.0;
+        t0 = t0 / 100.0;
+        toff = toff / 100.0;
+        t4 = t4 / 100.0;
+
+        println!("t0: {}, t1: {}, toff: {}, t4: {}", t0, t1, toff, t4);
+        return Some((t0, t1, toff, t4));
     }
+    None
 }
 
 fn main() {
     let bt_session = &BluetoothSession::create_session(None).unwrap();
     let adapter: BluetoothAdapter = BluetoothAdapter::init(bt_session).unwrap();
     let adapter_id = adapter.get_id();
+    // 创建蓝牙搜索的Session
     let discover_session =
         BluetoothDiscoverySession::create_session(&bt_session, adapter_id).unwrap();
+    // 开始扫描设备
     discover_session.start_discovery().unwrap();
+    // 等待几秒
     thread::sleep(Duration::from_secs(5));
+    // 获取设备列便
     let device_list = adapter.get_device_list().unwrap();
+    // 结束扫描
     discover_session.stop_discovery().unwrap();
 
     for device_path in device_list {
         let device = BluetoothDevice::new(bt_session, device_path.to_string());
         println!(
-            "Device: {:?} Name: {:?}",
+            "Device: {:?} Name: {:?}, RSSI: {:?}",
             device_path,
-            device.get_name().ok()
+            device.get_name().ok(),
+            device.get_rssi().ok()
         );
     }
 
@@ -193,13 +223,6 @@ fn main() {
         bt_session,
         String::from("/org/bluez/hci0/dev_00_81_F9_DF_B0_40"), // mmc
     );
-
-    // if !device.is_paired().unwrap() {
-    //     let r = device.pair();
-    //     println!("Pair returns {:?}", r);
-    // } else {
-    //     println!("Device paired");
-    // }
 
     if let Err(e) = device.connect(10000) {
         println!("Failed to connect {:?}: {:?}", device.get_id(), e);
@@ -210,86 +233,25 @@ fn main() {
         thread::sleep(Duration::from_secs(5));
 
         // print services, characteristics and descriptors
-        explore_device(&device, bt_session);
+        // explore_device(&device, bt_session);
 
-        println!(
-            "--------------------------------------------------------------------------------"
-        );
-
-        // print to notifications
-        // let ch = BluetoothGATTCharacteristic::new(
-        //     bt_session,
-        //     String::from("/org/bluez/hci0/dev_A4_C1_38_15_03_55/service0021/char0035"),
-        // );
-
-        // let uuid_service = "8850";
-        // let uuid_characteritic = "885a";
-
-        let uuid_service = "1809";
-        let uuid_characteritic = "2a1e";
-
-        if let Some(service) = get_service(uuid_service, &device, bt_session) {
-            let session = bt_session;
-            let w_ch = vec![
-                "/org/bluez/hci0/dev_10_38_C1_30_7B_03/service0020/char0025",
-                "/org/bluez/hci0/dev_10_38_C1_30_7B_03/service0020/char0023",
-                "/org/bluez/hci0/dev_10_38_C1_30_7B_03/service0020/char0021",
-            ];
-            // for s in w_ch {
-            //     let ch = BluetoothGATTCharacteristic::new(&session, String::from(s));
-            //     ch.write_value(vec![0x01, 0x00], None).unwrap();
-            // }
-
-            if let Some(ch) = get_characteritic(uuid_characteritic, &service, session) {
-                ch.start_notify().unwrap();
-
-                loop {
-                    // let session = BluetoothSession::create_session(None).unwrap();
-                    for event in session.incoming(1000).map(BluetoothEvent::from) {
-                        println!("recv: {:?}", event);
+        let service = get_service(MMC_SERVICE_UUID, &device, bt_session).unwrap();
+        let ch = get_characteritic(MMC_CHAR_UUID, &service, bt_session).unwrap();
+        ch.start_notify().unwrap();
+        loop {
+            for event in bt_session.incoming(1000).map(BluetoothEvent::from) {
+                if let Some(event) = event {
+                    println!("recv: {:?}", event);
+                    match event {
+                        Value { object_path, value } => {
+                            if let Some((raw, _, _, t)) = parse_mmc_data(value) {
+                                println!("Raw t: {}, calibrated: {}", raw, t);
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                // use std::io::Read;
-                // let fd = ch.acquire_notify().unwrap();
             }
-
-        // let ch_a = BluetoothGATTCharacteristic::new(
-        //     &session,
-        //     String::from("/org/bluez/hci0/dev_10_38_C1_30_7B_03/service0020/char002a"),
-        // );
-        // let ch_b = BluetoothGATTCharacteristic::new(
-        //     &session,
-        //     String::from("/org/bluez/hci0/dev_10_38_C1_30_7B_03/service0020/char0027"),
-        // );
-
-        // ch_a.start_notify().unwrap();
-        // ch_b.start_notify().unwrap();
-
-        // loop {
-        //     let session = BluetoothSession::create_session(None).unwrap();
-        //     for event in session.incoming(1000).map(BluetoothEvent::from) {
-        //         println!("recv: {:?}", event);
-        //     }
-        // }
-
-        // character uuid 00002a50, battery?
-        // {
-        //     let ch = BluetoothGATTCharacteristic::new(
-        //         &session,
-        //         String::from("/org/bluez/hci0/dev_10_38_C1_30_7B_03/service000c/char000d"),
-        //     );
-
-        //     loop {
-        //         let r = ch.read_value(None).unwrap();
-        //         println!("Read: {:?}", r);
-        //         thread::sleep(Duration::from_millis(200));
-        //     }
-        // }
-        } else {
-            eprintln!("Service not found!");
         }
-
-        // Interact with device
-        device.disconnect().unwrap();
     }
 }

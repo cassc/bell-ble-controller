@@ -178,7 +178,7 @@ pub fn list_descriptors(characteristic: &BluetoothGATTCharacteristic, session: &
         let value = descriptor.read_value(None).unwrap();
         let value = match &assigned_number[4..] {
             "2901" => str::from_utf8(&value).unwrap().to_string(),
-            _ => format!("{:?}", value),
+            _ => format!("{:x?}", value),
         };
 
         println!(
